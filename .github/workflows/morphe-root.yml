@@ -1,0 +1,264 @@
+name: Morphe YouTube + YouTube Music (Root / tanpa MicroG)
+
+# Otomatis:
+#  1. Ambil Morphe CLI + patch Morphe terbaru (channel dev atau stable)
+#  2. Untuk tiap aplikasi: cari versi terbaru yang DIDUKUNG patch tersebut
+#  3. Download APK original (APKPure via apkeep, atau dari apk_url)
+#  4. Patch TANPA "GmsCore support" -> nama package tetap asli (tanpa MicroG)
+#  5. Upload ke GitHub Releases (dilewati kalau kombinasi versi sudah pernah dibuat)
+
+on:
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: "Aplikasi yang di-build"
+        type: choice
+        options: [semua, youtube, music]
+        default: semua
+      patches_channel:
+        description: "Channel patch Morphe"
+        type: choice
+        options: [dev, stable]
+        default: dev
+      youtube_version:
+        description: "Versi YouTube (kosong = otomatis terbaru yang didukung)"
+        type: string
+        default: ""
+      music_version:
+        description: "Versi YouTube Music (kosong = otomatis terbaru yang didukung)"
+        type: string
+        default: ""
+      youtube_apk_url:
+        description: "Opsional: link langsung APK YouTube original"
+        type: string
+        default: ""
+      music_apk_url:
+        description: "Opsional: link langsung APK YouTube Music original (arm64-v8a)"
+        type: string
+        default: ""
+      include_experimental:
+        description: "Ikutkan versi eksperimental (versi paling baru biasanya eksperimental)"
+        type: boolean
+        default: true
+      striplibs:
+        description: "Arsitektur native lib yang disimpan (kosong = semua)"
+        type: string
+        default: "arm64-v8a"
+      force_build:
+        description: "Tetap build walau release dengan versi yang sama sudah ada"
+        type: boolean
+        default: false
+  schedule:
+    # Tiap hari 03:17 WITA (19:17 UTC)
+    - cron: "17 19 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: morphe-root
+  cancel-in-progress: false
+
+env:
+  CHANNEL: ${{ inputs.patches_channel || 'dev' }}
+  INCLUDE_EXPERIMENTAL: ${{ github.event_name == 'schedule' || inputs.include_experimental }}
+  STRIPLIBS: ${{ github.event_name == 'schedule' && 'arm64-v8a' || inputs.striplibs }}
+  FORCE_BUILD: ${{ github.event_name != 'schedule' && inputs.force_build }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      cli_tag: ${{ steps.plan.outputs.cli_tag }}
+      patch_tag: ${{ steps.plan.outputs.patch_tag }}
+    steps:
+      - name: Tentukan versi Morphe & daftar aplikasi
+        id: plan
+        env:
+          APPS: ${{ inputs.apps || 'semua' }}
+        run: |
+          set -euo pipefail
+          # dev = release paling baru (pre-release ikut), stable = release "latest"
+          pick_tag() {
+            if [ "$CHANNEL" = "dev" ]; then
+              gh api "repos/$1/releases?per_page=30" --jq '[.[] | select(.draft | not)][0].tag_name'
+            else
+              gh api "repos/$1/releases/latest" --jq '.tag_name'
+            fi
+          }
+          CLI_TAG=$(pick_tag MorpheApp/morphe-desktop)
+          PATCH_TAG=$(pick_tag MorpheApp/morphe-patches)
+          echo "Morphe CLI : $CLI_TAG"
+          echo "Patches    : $PATCH_TAG"
+
+          YT='{"id":"youtube","app":"YouTube","pkg":"com.google.android.youtube","arch":"arm64-v8a;armeabi-v7a;armeabi;x86;x86_64"}'
+          YTM='{"id":"music","app":"YouTube Music","pkg":"com.google.android.apps.youtube.music","arch":"arm64-v8a"}'
+          case "$APPS" in
+            youtube) M="[$YT]" ;;
+            music)   M="[$YTM]" ;;
+            *)       M="[$YT,$YTM]" ;;
+          esac
+
+          {
+            echo "cli_tag=$CLI_TAG"
+            echo "patch_tag=$PATCH_TAG"
+            echo "matrix={\"include\":$M}"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    name: ${{ matrix.app }}
+    env:
+      APP: ${{ matrix.app }}
+      PKG: ${{ matrix.pkg }}
+      TAG_PREFIX: ${{ matrix.id }}
+      APK_ARCH: ${{ matrix.arch }}
+      CLI_TAG: ${{ needs.plan.outputs.cli_tag }}
+      PATCH_TAG: ${{ needs.plan.outputs.patch_tag }}
+      APP_VERSION: ${{ matrix.id == 'youtube' && inputs.youtube_version || matrix.id == 'music' && inputs.music_version || '' }}
+      APK_URL: ${{ matrix.id == 'youtube' && inputs.youtube_apk_url || matrix.id == 'music' && inputs.music_apk_url || '' }}
+    steps:
+      - name: Setup Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Download Morphe CLI, patch & apkeep
+        run: |
+          set -euo pipefail
+          mkdir -p bins
+          export MORPHE_DATA_DIR="$RUNNER_TEMP/morphe-data"; mkdir -p "$MORPHE_DATA_DIR"
+          echo "MORPHE_DATA_DIR=$MORPHE_DATA_DIR" >> "$GITHUB_ENV"
+
+          gh release download "$CLI_TAG" -R MorpheApp/morphe-desktop -p '*-all.jar' -O bins/morphe.jar --clobber
+          gh release download "$PATCH_TAG" -R MorpheApp/morphe-patches -p '*.mpp' -O bins/patches.mpp --clobber
+          gh release download -R EFForg/apkeep -p 'apkeep-x86_64-unknown-linux-gnu' -O bins/apkeep --clobber
+          chmod +x bins/apkeep
+          java -jar bins/morphe.jar --version || true
+
+      - name: Cari versi ${{ matrix.app }} yang didukung
+        run: |
+          set -euo pipefail
+          if [ -n "$APP_VERSION" ]; then
+            echo "$APP_VERSION" > candidates.txt
+          else
+            X=""; if [ "$INCLUDE_EXPERIMENTAL" = "true" ]; then X="-x"; fi
+            java -jar bins/morphe.jar list-versions --patches bins/patches.mpp -f "$PKG" $X 2>&1 | tee versions.txt
+            # Ambil semua versi (mis. 21.46.522 / 9.46.51), urutkan dari terbaru
+            grep -oE '\b[0-9]{1,2}\.[0-9]{2}\.[0-9]{2,3}\b' versions.txt | sort -uVr | head -n 5 > candidates.txt
+          fi
+          [ -s candidates.txt ] || { echo "::error::Tidak ada versi $APP yang didukung ditemukan"; exit 1; }
+          echo "Kandidat (urut terbaru):"; cat candidates.txt
+
+      - name: Download APK ${{ matrix.app }} original
+        id: apk
+        run: |
+          set -euo pipefail
+          mkdir -p apk
+          GOT=""; VER=""
+          if [ -n "$APK_URL" ]; then
+            curl -fL --retry 3 -o apk/original.apk "$APK_URL"
+            GOT=apk/original.apk; VER=$(head -n1 candidates.txt)
+            [ -n "$APP_VERSION" ] || echo "::warning::apk_url dipakai tanpa versi, diasumsikan versi $VER"
+          else
+            while read -r v; do
+              echo "== Coba $APP $v dari APKPure =="
+              rm -rf apk/*
+              if ./bins/apkeep -a "$PKG@$v" -d apk-pure -o "acknowledge_dangers=true,arch=$APK_ARCH" apk/ ; then
+                f=$(find apk -maxdepth 1 -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.apkm' \) | head -n1)
+                if [ -n "$f" ] && unzip -tq "$f" >/dev/null 2>&1; then GOT="$f"; VER="$v"; break; fi
+              fi
+              echo "Gagal/tidak tersedia, coba versi berikutnya..."
+            done < candidates.txt
+          fi
+          [ -n "$GOT" ] || { echo "::error::Gagal download APK $APP. Isi input apk_url dengan link APK original."; exit 1; }
+          ls -la apk
+          echo "file=$GOT" >> "$GITHUB_OUTPUT"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Cek release yang sudah ada
+        id: check
+        run: |
+          TAG="${TAG_PREFIX}-${{ steps.apk.outputs.version }}-morphe-${PATCH_TAG}-root"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 && [ "$FORCE_BUILD" != "true" ]; then
+            echo "Release $TAG sudah ada, build dilewati."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Siapkan keystore
+        if: steps.check.outputs.skip != 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.KEYSTORE_ALIAS }}
+          KEYSTORE_ENTRY_PASSWORD: ${{ secrets.KEYSTORE_ENTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : > ks_args.txt
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/morphe.keystore"
+            ENTRY_PW="${KEYSTORE_ENTRY_PASSWORD:-${KEYSTORE_PASSWORD:-}}"
+            printf '%s\n' --keystore "$RUNNER_TEMP/morphe.keystore" > ks_args.txt
+            if [ -n "${KEYSTORE_PASSWORD:-}" ]; then printf '%s\n' --keystore-password "$KEYSTORE_PASSWORD" >> ks_args.txt; fi
+            if [ -n "${KEYSTORE_ALIAS:-}" ]; then printf '%s\n' --keystore-entry-alias "$KEYSTORE_ALIAS" >> ks_args.txt; fi
+            if [ -n "$ENTRY_PW" ]; then printf '%s\n' --keystore-entry-password "$ENTRY_PW" >> ks_args.txt; fi
+            echo "Pakai keystore dari secret."
+          else
+            echo "::warning::Secret KEYSTORE_BASE64 belum diisi: APK ditandatangani key acak (tetap bisa diinstall kalau signature verification dimatikan)."
+          fi
+
+      - name: Patch ${{ matrix.app }} (tanpa GmsCore/MicroG)
+        if: steps.check.outputs.skip != 'true'
+        id: patch
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          VER="${{ steps.apk.outputs.version }}"
+          OUT="out/${APP// /-}-${VER}-Morphe-${PATCH_TAG#v}-ROOT.apk"
+
+          ARGS=(patch -p bins/patches.mpp -d "GmsCore support" -o "$OUT" -r out/result.json --continue-on-error)
+          if [ -n "$STRIPLIBS" ]; then ARGS+=(--striplibs "$STRIPLIBS"); fi
+          mapfile -t KS < ks_args.txt
+          ARGS+=("${KS[@]}")
+
+          java -jar bins/morphe.jar "${ARGS[@]}" "${{ steps.apk.outputs.file }}"
+
+          [ -f "$OUT" ] || { echo "::error::APK hasil patch tidak ditemukan"; exit 1; }
+          sha256sum "$OUT" | tee "$OUT.sha256"
+          echo "out=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Buat release
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          FAILED=$(jq -r '.failedPatches[]? | (.name // .patchName // tostring)' out/result.json 2>/dev/null || true)
+          {
+            echo "**$APP** ${{ steps.apk.outputs.version }} · **Morphe patches** $PATCH_TAG · CLI $CLI_TAG"
+            echo
+            echo "Varian ROOT / tanpa MicroG: patch \`GmsCore support\` dinonaktifkan, package tetap \`$PKG\`."
+            echo "Install langsung menimpa $APP asli dengan signature verification dimatikan (CorePatch dsb.)."
+            echo
+            echo "Native lib: ${STRIPLIBS:-semua arsitektur}"
+            if [ -n "$FAILED" ]; then
+              echo; echo "⚠️ Patch yang gagal diterapkan:"; while read -r l; do echo "- $l"; done <<< "$FAILED"
+            fi
+          } > notes.md
+
+          PRE=""; if [ "$CHANNEL" = "dev" ]; then PRE="--prerelease"; fi
+          gh release delete "${{ steps.check.outputs.tag }}" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "${{ steps.check.outputs.tag }}" -R "$GITHUB_REPOSITORY" $PRE \
+            --title "$APP ${{ steps.apk.outputs.version }} · Morphe $PATCH_TAG (Root)" \
+            --notes-file notes.md \
+            "${{ steps.patch.outputs.out }}" "${{ steps.patch.outputs.out }}.sha256"
+            
