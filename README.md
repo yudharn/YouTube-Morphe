@@ -9,9 +9,7 @@ The app icon and name are left untouched too (`Custom branding` is disabled), so
 ## Requirements
 
 - Root (KernelSU / Magisk / APatch)
-- Signature verification disabled, e.g. with CorePatch (LSPosed) or a similar module
-- The **keep previous signature** option enabled (in CorePatch it's called "Use previous signatures" / UsePreSig). This one matters, see [Google account missing](#google-account-missing)
-- The stock app from the Play Store already installed and signed in before you install the patched one
+- Signature and digest verification disabled, e.g. with CorePatch (LSPosed) or a similar module
 
 No root? Then this isn't for you. Use the regular Morphe Manager with MicroG instead.
 
@@ -23,11 +21,16 @@ Workflow file: `.github/workflows/morphe-root.yml`
 2. Looks up the newest YouTube / YouTube Music version those patches support (`list-versions`).
 3. Downloads the stock APK from APKPure using [apkeep](https://github.com/EFForg/apkeep). If the newest version isn't there yet, it falls back to the previous one.
 4. Patches it without `GmsCore support` and without `Custom branding`.
-5. Uploads the result to Releases.
+5. Puts the original Google signing block from the stock APK back onto the patched APK.
+6. Publishes YouTube and YouTube Music together in one release.
 
-YouTube and YouTube Music build in parallel. If one fails, the other keeps going.
+Both apps build in parallel. If one of them fails or hasn't changed, the release carries over that app's APK from the previous release, so every release always has both.
 
-It runs on its own every day at 19:17 UTC. If the app version and patch version are the same as the last release, the build is skipped, so Releases doesn't fill up with duplicates.
+It runs on its own every day at 19:17 UTC. If neither app nor the patches changed since the last release, nothing gets published, so Releases doesn't fill up with duplicates.
+
+### About the signature
+
+Because the APK still carries Google's certificate, Android and Play Services see it as the official app. Your Google account stays signed in across updates, the same way it does with other root builds that do this. The catch is that the signature no longer matches the content, which is why digest verification has to be off on the device. Without that the install just fails.
 
 A note on "latest": it picks the newest version the **patches support**, not the newest one on the Play Store. If the Play Store already has something newer, you'll have to wait for Morphe to catch up.
 
@@ -52,15 +55,16 @@ That's it. No secrets required.
 | `music_apk_url` | empty | Same, for YouTube Music (use the arm64-v8a APK) |
 | `include_experimental` | `true` | Include versions the patches mark as experimental |
 | `striplibs` | `arm64-v8a` | Native lib architectures to keep. Leave empty to keep all |
+| `signature` | `original` | `original` keeps Google's signature, `custom` signs with your own keystore |
 | `force_build` | `false` | Rebuild even if a release with the same versions already exists |
 
 If you use one of the `*_apk_url` inputs, fill in the matching version too, so the file name and release tag come out right.
 
-## Keystore (optional)
+## Keystore (only for `signature: custom`)
 
-Without a keystore, every build is signed with a random key. As long as signature verification is disabled on your phone, that's fine.
+You don't need this with the default `original` mode. With `custom` and no keystore, every build gets a random key, and your Google account will most likely disappear after each update.
 
-If you'd rather have a fixed key:
+If you want to use `custom`, set up a fixed key:
 
 ```bash
 keytool -genkeypair -keystore morphe.keystore -storetype PKCS12 \
@@ -87,9 +91,7 @@ Before a big update, back up your settings from Morphe's import/export option in
 
 ## Google account missing
 
-If you open the app and get an "Add account" screen with an empty account list, it's almost certainly a signature issue.
-
-Play Services only hands Google accounts to apps registered with Google's signature. Disabling signature verification only lets the APK *install*. What keeps your account working is the keep-previous-signature option, because the system keeps the original Google signature on record.
+If you open the app and get an "Add account" screen with an empty account list, it's almost certainly a signature issue. Play Services only hands Google accounts to apps registered with Google's signature. This happens if the app on your phone was installed from a build signed with some other key, for example an older `custom` build.
 
 Check it first:
 
@@ -98,18 +100,13 @@ su -c "dumpsys package com.google.android.youtube | grep -m1 signatures"
 su -c "dumpsys package com.google.android.apps.youtube.music | grep -m1 signatures"
 ```
 
-If the broken app shows a different signature than the working one, fix it like this:
-
-1. Back up your Morphe settings, then uninstall the patched app.
-2. Install the stock app from the Play Store and sign in.
-3. Make sure UsePreSig (or whatever your module calls it) is enabled.
-4. Install the patched APK on top.
+If the broken app shows a different signature than the working one, back up your Morphe settings, uninstall the app and install the `original` build from Releases. After that, updates keep your account.
 
 ## Release format
 
-Tags: `youtube-<version>-morphe-<patch version>-root` and `music-<version>-morphe-<patch version>-root`
+One release per update, holding both apps. Tag: `morphe-<patch version>-yt-<version>-ytm-<version>`, e.g. `morphe-v2.4.0-dev.9-yt-21.46.522-ytm-9.46.51`
 
-Files: e.g. `YouTube-21.46.522-Morphe-2.4.0-dev.9-ROOT.apk`, plus a `.sha256` file for checking the hash.
+Files: `YouTube-21.46.522-Morphe-2.4.0-dev.9-ROOT.apk` and `YouTube-Music-9.46.51-Morphe-2.4.0-dev.9-ROOT.apk`, each with a `.sha256` file for checking the hash.
 
 If any patch fails to apply, it's listed in the release notes.
 
