@@ -71,6 +71,8 @@ env:
   FORCE_BUILD: ${{ github.event_name != 'schedule' && inputs.force_build }}
   SIGNATURE: ${{ inputs.signature || 'original' }}
   GH_TOKEN: ${{ github.token }}
+  # Name of the Morphe entry in the app settings
+  SETTINGS_TITLE: "Morphe (Patch By Yudharn)"
 
 jobs:
   plan:
@@ -150,7 +152,7 @@ jobs:
           chmod +x bins/apkeep
           java -jar bins/morphe.jar --version || true
 
-      - name: Write signature helper
+      - name: Write helper scripts
         run: |
           cat > bins/keep_original_signature.py <<'PY'
           #!/usr/bin/env python3
@@ -223,6 +225,48 @@ jobs:
           if __name__ == "__main__":
               main()
           PY
+
+          cat > bins/set_settings_title.py <<'PY'
+          #!/usr/bin/env python3
+          """Change the Morphe settings entry name inside a patches .mpp bundle.
+
+          usage: set_settings_title.py <patches.mpp> "<new title>"
+          """
+          import html
+          import os
+          import re
+          import sys
+          import zipfile
+
+          ENTRY = "addresources/values/shared/strings.xml"
+          PATTERN = re.compile(r'(<string name="morphe_settings_title"[^>]*>)[^<]*(</string>)')
+
+
+          def main():
+              mpp, title = sys.argv[1], sys.argv[2]
+              tmp = mpp + ".tmp"
+              found = False
+              with zipfile.ZipFile(mpp) as src, zipfile.ZipFile(tmp, "w") as dst:
+                  for info in src.infolist():
+                      data = src.read(info)
+                      if info.filename == ENTRY:
+                          text, n = PATTERN.subn(lambda m: m.group(1) + html.escape(title, quote=False) + m.group(2),
+                                                 data.decode("utf-8"))
+                          found = n == 1
+                          data = text.encode("utf-8")
+                      dst.writestr(info, data, compress_type=info.compress_type)
+              if not found:
+                  os.remove(tmp)
+                  sys.exit(f"morphe_settings_title not found in {ENTRY}, the patches layout changed")
+              os.replace(tmp, mpp)
+              print(f"settings title set to: {title}")
+
+
+          if __name__ == "__main__":
+              main()
+          PY
+
+          python3 -I bins/set_settings_title.py bins/patches.mpp "$SETTINGS_TITLE"
 
       - name: Find supported ${{ matrix.app }} versions
         run: |
@@ -406,6 +450,8 @@ jobs:
 
           {
             echo "**Morphe patches** $PATCH_TAG · CLI $CLI_TAG"
+            echo
+            echo "Settings entry: **$SETTINGS_TITLE**"
             echo
             echo "Root builds without MicroG. \`GmsCore support\` and \`Custom branding\` are disabled, so the package name, icon and app name stay original."
             if [ "${SIGNATURE}" = "original" ]; then
