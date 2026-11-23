@@ -20,7 +20,7 @@ Workflow file: `.github/workflows/morphe-root.yml`
 1. Grabs the latest Morphe CLI (`MorpheApp/morphe-desktop`) and patches (`MorpheApp/morphe-patches`). Defaults to the `dev` channel.
 2. Looks up the newest YouTube / YouTube Music version those patches support (`list-versions`).
 3. Downloads the stock APK from APKPure using [apkeep](https://github.com/EFForg/apkeep). If the newest version isn't there yet, it falls back to the previous one.
-4. Patches it without `GmsCore support` and without `Custom branding`.
+4. Renames the Morphe entry in the app settings to **Morphe (Patch By Yudharn)**, then patches without `GmsCore support` and without `Custom branding`.
 5. Puts the original Google signing block from the stock APK back onto the patched APK.
 6. Publishes YouTube and YouTube Music together in one release.
 
@@ -36,12 +36,28 @@ A note on "latest": it picks the newest version the **patches support**, not the
 
 ## Setup
 
-1. Fork or clone this repo.
-2. Go to **Settings → Actions → General** and set *Workflow permissions* to **Read and write permissions**.
-3. Open the **Actions** tab and enable workflows if GitHub asks.
-4. Kick off a manual run with **Run workflow** to test it.
+The build runs in one repo, and the APKs are published to [yudharn/YouTube-Morphe](https://github.com/yudharn/YouTube-Morphe). That way the release repo stays clean: just releases, no workflow noise.
 
-That's it. No secrets required.
+**1. Release repo** (`yudharn/YouTube-Morphe`)
+
+It needs at least one commit (a README is enough), because a release tag has to point at something. Nothing else goes in there.
+
+**2. Token**
+
+Create a fine-grained token at **GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens**:
+
+- Repository access: *Only select repositories* → `YouTube-Morphe`
+- Permissions: **Contents → Read and write** (Metadata read-only gets added automatically)
+- Expiration: whatever you like, just remember to renew it before it runs out
+
+A classic token with the `public_repo` scope (or `repo` if the release repo is private) works too.
+
+**3. Builder repo** (the one holding `.github/workflows/morphe-root.yml`)
+
+- **Settings → Secrets and variables → Actions → New repository secret**: name it `RELEASE_TOKEN`, paste the token
+- Open the **Actions** tab, enable workflows if asked, then start a run with **Run workflow**
+
+The first step checks that the token can reach the release repo and stops with a clear error if it can't. To publish somewhere else, change `RELEASE_REPO` at the top of the workflow.
 
 ## Manual run inputs
 
@@ -109,6 +125,10 @@ One release per update, holding both apps. Tag: `morphe-<patch version>-yt-<vers
 Files: `YouTube-21.46.522-Morphe-2.4.0-dev.9-ROOT.apk` and `YouTube-Music-9.46.51-Morphe-2.4.0-dev.9-ROOT.apk`, each with a `.sha256` file for checking the hash.
 
 If any patch fails to apply, it's listed in the release notes.
+
+## Forking
+
+Go ahead, but please keep the "Patch By Yudharn" credit in the settings name (`SETTINGS_TITLE` at the top of the workflow). If you change the patches or the build in a meaningful way, add your own name next to it instead of replacing it.
 
 ## License & credits
 
