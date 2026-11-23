@@ -101,7 +101,7 @@ jobs:
           echo "Morphe CLI : $CLI_TAG"
           echo "Patches    : $PATCH_TAG"
 
-          YT='{"id":"youtube","app":"YouTube","pkg":"com.google.android.youtube","arch":"arm64-v8a;armeabi-v7a;armeabi;x86;x86_64"}'
+          YT='{"id":"youtube","app":"YouTube","pkg":"com.google.android.youtube","arch":"arm64-v8a"}'
           YTM='{"id":"music","app":"YouTube Music","pkg":"com.google.android.apps.youtube.music","arch":"arm64-v8a"}'
           case "$APPS" in
             youtube) M="[$YT]" ;;
@@ -268,6 +268,21 @@ jobs:
 
           python3 -I bins/set_settings_title.py bins/patches.mpp "$SETTINGS_TITLE"
 
+          # has_arch.py <apk|apkm|xapk|apks> <arch> : exit 0 only if native libs for <arch> are present
+          cat > bins/has_arch.py <<'PY'
+          import io, sys, zipfile
+          path, arch = sys.argv[1], sys.argv[2]
+          def libs(z):
+              return [n for n in z.namelist() if n.startswith(f"lib/{arch}/") and n.endswith(".so")]
+          with zipfile.ZipFile(path) as z:
+              found = libs(z)
+              for n in z.namelist():
+                  if not found and n.endswith(".apk"):
+                      found = libs(zipfile.ZipFile(io.BytesIO(z.read(n))))
+          print(f"{path}: {len(found)} native libs for {arch}")
+          sys.exit(0 if found else 1)
+          PY
+
       - name: Find supported ${{ matrix.app }} versions
         run: |
           set -euo pipefail
@@ -287,9 +302,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p apk
+          # The arch the patched APK must keep: first entry of striplibs, arm64-v8a by default
+          REQ_ARCH="${STRIPLIBS%%,*}"; REQ_ARCH="${REQ_ARCH:-arm64-v8a}"
+          echo "REQ_ARCH=$REQ_ARCH" >> "$GITHUB_ENV"
           GOT=""; VER=""
           if [ -n "$APK_URL" ]; then
             curl -fL --retry 3 -o apk/original.apk "$APK_URL"
+            python3 -I bins/has_arch.py apk/original.apk "$REQ_ARCH" \
+              || { echo "::error::apk_url APK has no $REQ_ARCH native libs"; exit 1; }
             GOT=apk/original.apk; VER=$(head -n1 candidates.txt)
             [ -n "$APP_VERSION" ] || echo "::warning::apk_url given without a version, assuming $VER"
           else
@@ -298,7 +318,10 @@ jobs:
               rm -rf apk/*
               if ./bins/apkeep -a "$PKG@$v" -d apk-pure -o "acknowledge_dangers=true,arch=$APK_ARCH" apk/ ; then
                 f=$(find apk -maxdepth 1 -type f \( -name '*.apk' -o -name '*.xapk' -o -name '*.apkm' \) | head -n1)
-                if [ -n "$f" ] && unzip -tq "$f" >/dev/null 2>&1; then GOT="$f"; VER="$v"; break; fi
+                if [ -n "$f" ] && unzip -tq "$f" >/dev/null 2>&1; then
+                  if python3 -I bins/has_arch.py "$f" "$REQ_ARCH"; then GOT="$f"; VER="$v"; break; fi
+                  echo "::warning::$f has no $REQ_ARCH native libs, skipping it"
+                fi
               fi
               echo "Failed or not available, trying the next version..."
             done < candidates.txt
@@ -378,6 +401,8 @@ jobs:
           fi
 
           [ -f "$OUT" ] || { echo "::error::Patched APK not found"; exit 1; }
+          python3 -I bins/has_arch.py "$OUT" "$REQ_ARCH" \
+            || { echo "::error::Patched APK has no $REQ_ARCH native libs, it would crash on launch"; exit 1; }
           sha256sum "$OUT" | tee "$OUT.sha256"
           echo "out=$OUT" >> "$GITHUB_OUTPUT"
 
@@ -475,3 +500,4 @@ jobs:
           gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest \
             --title "$TITLE" --notes-file notes.md \
             ./*.apk ./*.apk.sha256
+            
